@@ -1,0 +1,15 @@
+services:
+  service-yadisk-api:
+    container_name: 'service-yadisk-api'
+    build: .
+    ports:
+      - '9277:9277'
+    volumes:
+      - ./src:/app
+      - ./src/configs/config.yaml:/app/configs/config.yaml
+    restart: always
+
+networks:
+  default:
+    name: yadisk_api_network
+    external: true

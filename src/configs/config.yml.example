@@ -1,0 +1,12 @@
+token: "api_key"
+sync_frequency: "5m"  # 5 minutes
+
+folders:
+  - local: "/tmp/file1"
+    remote: "disk:/backup/file1"
+    sync_mode: "bidirectional"  # upload, download, or bidirectional
+    delete_mode: "both"  # none, local, remote, or both
+  - local: "/tmp/file2"
+    remote: "disk:/backup/file2"
+    sync_mode: "upload"  # upload, download, or bidirectional
+    delete_mode: "none"  # none, local, remote, or both

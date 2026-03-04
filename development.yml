@@ -1,0 +1,18 @@
+services:
+  dev-service-yadisk-api:
+    container_name: 'dev-service-yadisk-api'
+    build: 
+      context: .
+      dockerfile: development.dockerfile
+    ports:
+      - '9277:9277'
+    volumes:
+      - ./src:/app
+      - ./src/configs/config.yaml:/app/configs/config.yaml
+
+    restart: unless-stopped
+
+networks:
+  default:
+    name: yadisk_api_network
+    external: true
