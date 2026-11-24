@@ -1,0 +1,105 @@
+#!/bin/sh /etc/rc.common
+# Yandex.Disk Sync — procd-сервис для OpenWrt
+#
+# Установка:
+#   cp yandex-sync /etc/init.d/yandex-sync
+#   chmod +x /etc/init.d/yandex-sync
+#   /etc/init.d/yandex-sync enable
+#
+# Управление:
+#   /etc/init.d/yandex-sync start|stop|restart|reload|status
+#
+# Примечания:
+#   - DATA_DIR держит кэш и логи — должен быть на постоянном носителе
+#     (/tmp в OpenWrt — tmpfs, содержимое не переживает ребут)
+#   - reload шлёт SIGHUP: процесс завершается gracefully (сохраняет кэш),
+#     procd тут же поднимает его заново с актуальным конфигом
+#   - логи смотреть: logread | grep yandex-sync
+
+START=99
+STOP=15
+USE_PROCD=1
+
+PROG="/usr/bin/yandex-sync"
+CONFIG_PATH="/etc/yandex-sync/config.yaml"
+DATA_DIR="/etc/yandex-sync"
+LOG_DIR="$DATA_DIR/logs"
+CACHE_PATH="$DATA_DIR/cache.json"
+
+NAME="yandex-sync"
+
+start_service() {
+	if [ ! -x "$PROG" ]; then
+		logger -t "$NAME" "error: binary not found or not executable: $PROG"
+		return 1
+	fi
+	if [ ! -f "$CONFIG_PATH" ]; then
+		logger -t "$NAME" "error: config not found: $CONFIG_PATH"
+		return 1
+	fi
+
+	mkdir -p "$LOG_DIR"
+
+	procd_open_instance "$NAME"
+
+	# Переменные окружения задаём через /usr/bin/env в самой команде:
+	# procd_set_param env на старых версиях procd (Chaos Calmer) молча
+	# игнорируется — и процесс не видит CONFIG_PATH.
+	# Здесь только пути — режимы (log_mode, http_port и т.п.) настраиваются
+	# в config.yaml, env их не перекрывает.
+	procd_set_param command /usr/bin/env \
+		"CONFIG_PATH=$CONFIG_PATH" \
+		"CACHE_PATH=$CACHE_PATH" \
+		"LOG_DIR=$LOG_DIR" \
+		"$PROG"
+
+	# Автоперезапуск: до 5 попыток с интервалом 5s в окне 3600s
+	procd_set_param respawn 3600 5 5
+
+	# stdout/stderr -> syslog (logread)
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+
+	# До 30s на graceful shutdown: завершить передачу и сохранить кэш,
+	# затем SIGKILL, если не успел
+	procd_set_param term_timeout 30
+
+	# Следить за конфигом: /etc/init.d/yandex-sync reload рестартует
+	# сервис, если файл изменился
+	procd_set_param file "$CONFIG_PATH"
+
+	procd_close_instance
+}
+
+stop_service() {
+	# procd сам шлёт SIGTERM (graceful shutdown с сохранением кэша),
+	# через term_timeout — SIGKILL. Дополнительных действий не нужно.
+	return 0
+}
+
+reload_service() {
+	# Мягкая перезагрузка: SIGHUP -> graceful exit -> respawn поднимает
+	# процесс с уже перечитанным конфигом. Если не запущен — стартуем.
+	if pidof "$NAME" >/dev/null 2>&1; then
+		killall -HUP "$NAME" 2>/dev/null
+	else
+		start
+	fi
+}
+
+# В старом rc.common (Chaos Calmer) команда status диспатчится в
+# status_service; в новых — в status. Определяем обе.
+status_service() {
+	local pid
+	pid=$(pidof "$NAME" 2>/dev/null)
+	if [ -n "$pid" ]; then
+		echo "$NAME is running (pid $pid)"
+		return 0
+	fi
+	echo "$NAME is not running"
+	return 1
+}
+
+status() {
+	status_service
+}

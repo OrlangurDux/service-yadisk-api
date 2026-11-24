@@ -1,22 +1,24 @@
 package logger
 
-import "time"
+import (
+	"service-yadisk-api/internal/models"
+)
 
-// LogEntry представляет одну запись в логе (ошибка или событие)
-type LogEntry struct {
-	Timestamp time.Time
-	Level     string // "info", "error", "warning"
-	Operation string // "upload", "download", "delete", "folder"
-	Path      string
-	Message   string
-}
+// Режимы логирования (config.LogMode)
+const (
+	ModeOff      = "off"      // файловые логи отключены
+	ModeSimple   = "simple"   // только итоги сессий
+	ModeExtended = "extended" // итоги + детальный лог операций отдельным файлом
+)
 
-// Logger определяет интерфейс для логирования
+// Logger определяет интерфейс для логирования сеансов синхронизации
 type Logger interface {
-	// Log записывает отдельное событие
-	Log(entry LogEntry) error
+	// BeginSession открывает сессию логирования (создаёт detail-файл в extended-режиме)
+	BeginSession(sessionID int) error
+	// LogError потоково записывает ошибку (в extended-режиме — в detail-файл)
+	LogError(err models.ErrorDetail) error
 	// LogSession записывает итоговый отчёт по завершении сеанса синхронизации
-	LogSession(sessionID int, start, end time.Time, uploaded, downloaded, skipped int, errors []LogEntry) error
+	LogSession(sessionID int, result *models.SyncResult) error
 	// Close освобождает ресурсы
 	Close() error
 }
@@ -24,8 +26,9 @@ type Logger interface {
 // NilLogger — пустая реализация, ничего не делающая (удобно для тестов)
 type NilLogger struct{}
 
-func (n NilLogger) Log(entry LogEntry) error { return nil }
-func (n NilLogger) LogSession(sessionID int, start, end time.Time, uploaded, downloaded, skipped int, errors []LogEntry) error {
-	return nil
-}
-func (n NilLogger) Close() error { return nil }
+func (n NilLogger) BeginSession(sessionID int) error              { return nil }
+func (n NilLogger) LogError(err models.ErrorDetail) error         { return nil }
+func (n NilLogger) LogSession(id int, r *models.SyncResult) error { return nil }
+func (n NilLogger) Close() error                                  { return nil }
+
+var _ Logger = NilLogger{}

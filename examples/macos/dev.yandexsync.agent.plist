@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Yandex.Disk Sync — launchd user-agent для macOS (Apple Silicon)
+     Установка:
+       sed "s|__HOME__|$HOME|g" dev.yandexsync.agent.plist > \
+           ~/Library/LaunchAgents/dev.yandexsync.agent.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.yandexsync.agent.plist
+
+     Управление:
+       launchctl kickstart -k gui/$(id -u)/dev.yandexsync.agent   # перезапуск
+       launchctl bootout gui/$(id -u)/dev.yandexsync.agent        # выгрузить
+
+     Примечания:
+       - launchd НЕ раскрывает ~ или переменные в путях — все пути
+         шаблонизированы через __HOME__ и подставляются sed-ом
+       - KeepAlive: агент перезапускается при падении
+       - SoftResourceLimits + ProcessType=Background: не мешает системе
+       - SIGHUP/SIGTERM обрабатываются бинарём как graceful shutdown
+         (завершение передач + сохранение кэша)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.yandexsync.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>CONFIG_PATH=__HOME__/.config/yandex-sync/config.yaml</string>
+        <string>CACHE_PATH=__HOME__/Library/Application Support/yandex-sync/cache.json</string>
+        <string>LOG_DIR=__HOME__/Library/Logs/yandex-sync</string>
+        <string>/usr/local/bin/yandex-sync</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__/Library/Application Support/yandex-sync</string>
+
+    <!-- Перезапуск при падении (graceful exit по сигналу тоже перезапустит —
+         для reload достаточно kill -HUP) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Троттлинг перезапусков: не чаще раза в 10 секунд -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Фоновый приоритет, без лимита CPU от launchd -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- stdout/stderr launchd -> файл (видно и в Console.app) -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/yandex-sync/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/yandex-sync/stderr.log</string>
+</dict>
+</plist>

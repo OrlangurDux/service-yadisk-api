@@ -1,0 +1,11 @@
+.git
+.idea
+.DS_Store
+vendor/
+yandex-sync-*
+yadisk-api
+main
+*.log
+logs/
+README.md
+AGENTS.md

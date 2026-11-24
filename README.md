@@ -1,299 +1,295 @@
 # Яндекс.Диск Синхронизатор
 
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8)
+![Go](https://img.shields.io/badge/Go-1.23+-00ADD8)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Docker Ready](https://img.shields.io/badge/Docker-ready-blue)
 
-> Yandex.Disk Sync — это двусторонний синхронизатор файлов между локальной файловой системой и Яндекс.Диском с интеллектуальной проверкой контрольных сумм (MD5). Программа работает в фоновом режиме, периодически синхронизируя указанные папки, и поддерживает гибкие настройки режимов синхронизации и удаления.
+> Yandex.Disk Sync — двусторонний синхронизатор файлов между локальной файловой системой и Яндекс.Диском с проверкой контрольных сумм (MD5) и историей синхронизации. Работает в фоновом режиме, периодически синхронизируя указанные папки, умеет распространять удаления и разрешать конфликты.
 
 ## Возможности
 
-🔄 Двусторонняя синхронизация (локальная ↔ облако) с настраиваемыми режимами: upload, download, bidirectional.  
-🔍 Интеллектуальная проверка MD5 — синхронизируются только изменённые файлы, экономя трафик и время.  
-⏱️ Настраиваемая частота синхронизации (например, 5m, 1h).  
-🗑️ Гибкая политика удаления файлов: none, local, remote, both.  
-🐳 Поддержка Docker для удобного развёртывания и разработки.  
-🏗️ Сборка под различные архитектуры, включая OpenWrt (ARM).  
-📝 Детальное логирование с эмодзи для наглядности.  
-📊 Статистика работы (количество загруженных, скачанных, пропущенных файлов).  
-⚡ Graceful shutdown — корректное завершение при получении сигналов ОС.  
-✅ Полное покрытие тестами (TDD подход).
+- Двусторонняя синхронизация (локальная ↔ облако): `upload`, `download`, `bidirectional`.
+- Проверка по MD5 + размеру + mtime — передаются только изменённые файлы.
+- Разрешение конфликтов: в bidirectional побеждает более новая версия (при равном mtime — удалённая); режимы upload/download зеркалируют источник.
+- Распространение удалений через историю синхронизации (кэш): файл, удалённый на одной стороне, удаляется и на другой — если разрешено `delete_mode`.
+- HTTP-эндпоинты статуса: `GET /healthz`, `GET /stats` (порт 9277).
+- Retry с экспоненциальным backoff для сбоев API (429/5xx/сеть), атомарное скачивание через временный файл.
+- Логи сессий в файлы: режимы `off` / `simple` / `extended` (детальный лог — отдельный файл в `log_dir/detail/`).
+- Graceful shutdown по сигналам ОС (SIGINT/SIGTERM/SIGHUP) с сохранением кэша.
+- Статический бинарь для Linux/OpenWrt (aarch64), Docker-образ на scratch.
+
 ## Требования
 
-- Go 1.21+ (для локальной сборки)
+- Go 1.23+ (для локальной сборки)
 - Docker и Docker Compose (опционально)
-- OAuth-токен Яндекс.Диска с правами cloud_api:disk.read и cloud_api:disk.write  
+- OAuth-токен Яндекс.Диска с правами `cloud_api:disk.read` и `cloud_api:disk.write`
 
 ## Быстрый старт
 
 ### 1. Получение OAuth-токена
-Зарегистрируйте приложение на Яндекс.OAuth.
-Добавьте права доступа: cloud_api:disk.read, cloud_api:disk.write.
-Получите токен для вашего приложения.
 
-### 2. Настройка конфигурации
-Создайте файл configs/config.yaml:
+1. Зарегистрируйте приложение на [Яндекс.OAuth](https://yandex.ru/dev/disk/poligon/).
+2. Добавьте права доступа: `cloud_api:disk.read`, `cloud_api:disk.write`.
+3. Получите токен для вашего приложения.
+
+### 2. Конфигурация
+
+Создайте `src/configs/config.yaml` (пример — `src/configs/config.yml.example`):
 
 ```yaml
 token: "ваш_oauth_токен"
-sync_frequency: "5m"  # частота проверки (5 минут)
+sync_frequency: "5m"
+
+cache_enabled: true          # кэш MD5 + история (нужен для распространения удалений)
+log_mode: "extended"         # off | simple | extended
+
+http_enabled: true           # /healthz, /stats
+http_port: 9277
 
 folders:
-- local: "/path/to/local/folder1"
-  remote: "disk:/backup/folder1"
-  sync_mode: "bidirectional"  # upload, download, bidirectional
-  delete_mode: "none"          # none, local, remote, both
+  - local: "/path/to/local/folder"
+    remote: "disk:/backup/folder"
+    sync_mode: "bidirectional"   # upload | download | bidirectional
+    delete_mode: "none"          # none | local | remote | both
+    exclude_pattern: "node_modules|*.tmp"  # маски через '|' 
 ```
-
-Также можно использовать переменные окружения (см. раздел "Конфигурация").
 
 ### 3. Запуск
 
-#### Локально (без Docker)
 ```bash
+# Локально
 cd src
 go mod download
-go build -o yandex-sync ./cmd/sync-tool
-./yandex-sync
-```
+go run .
 
-#### В Docker (режим разработки)
-```bash
-docker-compose up --build
-```
+# Docker (разработка, hot reload через CompileDaemon)
+docker compose -f development.yml up --build
 
-#### В Docker (продакшен)
-```bash
-docker-compose -f docker-compose.prod.yml up --build -d
+# Docker (продакшен)
+docker compose -f production.yml up --build -d
 ```
 
 ## Конфигурация
 
-### Файл конфигурации configs/config.yaml
+### Файл `configs/config.yaml`
 
-| Поле | Описание | Пример |
+| Поле | Описание | Пример / дефолт |
 |------|----------|--------|
-| token | OAuth-токен Яндекс.Диска (можно задать через переменную окружения) | "AQAAAA..." |
-| sync_frequency | Частота синхронизации (формат: число + единица: s, m, h) | "5m", "1h" |
-| folders | Список папок для синхронизации | - |
-| folders[].local | Путь к локальной папке | "/home/user/docs" |
-| folders[].remote | Путь на Яндекс.Диске (должен начинаться с disk:/) | "disk:/backup/docs" |
-| folders[].sync_mode | Режим синхронизации: upload, download, bidirectional | "bidirectional" |
-| folders[].delete_mode | Политика удаления: none, local, remote, both | "none" |
+| `token` | OAuth-токен (можно через env) | `"AQAAAA..."` |
+| `sync_frequency` | Частота синхронизации (`s`, `m`, `h`) | `"5m"` |
+| `cache_enabled` | Кэш MD5 и история синхронизации | `false` → рекомендуем `true` |
+| `cache_path` | Путь к файлу кэша | `~/.cache/yandex-sync/cache.json` |
+| `log_mode` | Файловые логи: `off`, `simple`, `extended` | `simple` |
+| `log_dir` | Каталог логов | `<dir cache>/logs` |
+| `log_max_files` | Лимит файлов логов (ротация) | `10` |
+| `http_enabled` | HTTP-сервер статуса | `true` |
+| `http_port` | Порт статус-сервера | `9277` |
+| `folders[].local` | Локальная папка | `/home/user/docs` |
+| `folders[].remote` | Папка на Яндекс.Диске | `disk:/backup/docs` |
+| `folders[].sync_mode` | Режим синхронизации | `bidirectional` |
+| `folders[].delete_mode` | Политика удаления | `none` |
+| `folders[].exclude_pattern` | Маски исключения через `|` | `node_modules\|*.tmp` |
 
-### Переменные окружения
+Внутри yaml доступна подстановка `${ENV_VAR}`.
 
-> Переменные имеют приоритет над файлом конфигурации.
+### Переменные окружения (приоритет над файлом)
 
-- **YANDEX_TOKEN** — OAuth-токен
-- **SYNC_FREQUENCY** — частота синхронизации (например, 5m)
-- **CONFIG_PATH** — путь к конфигурационному файлу (по умолчанию configs/config.yaml)
-- **LOCAL_FOLDER_1**, **LOCAL_FOLDER_2**, ... — локальные папки (для динамического создания конфига)
-- **REMOTE_FOLDER_1**, **REMOTE_FOLDER_2**, ... — соответствующие удалённые папки
-- **SYNC_MODE_1**, **SYNC_MODE_2**, ... — режимы синхронизации
-- **DELETE_MODE_1**, **DELETE_MODE_2**, ... — режимы удаления
+- `CONFIG_PATH` — путь к конфигу (по умолчанию `configs/config.yaml`)
+- `YANDEX_TOKEN` — OAuth-токен
+- `SYNC_FREQUENCY` — частота синхронизации (`5m`, `1h`)
+- `CACHE_ENABLED`, `CACHE_PATH`, `LOG_MODE`, `LOG_DIR`
+- `HTTP_ENABLED` (`true/false`), `HTTP_PORT`
+- `LOCAL_FOLDER_1`, `REMOTE_FOLDER_1`, `SYNC_MODE_1`, `DELETE_MODE_1`,
+  `EXCLUDE_PATTERN_1`, `_2`, ...
+  — если задана хотя бы одна пара `LOCAL/REMOTE_FOLDER_N`, список папок
+  из файла замещается env-конфигурацией (можно работать вообще без файла).
+
+### Исключения (`exclude_pattern`)
+
+Маски разделяются `|`: `"node_modules|cache_*|vendor|*.tmp"`.
+
+- Маска **без `/`** сравнивается с именем каждого файла и каждой папки на
+  любой глубине (`node_modules` исключает и саму папку, и всё содержимое).
+- Маска **с `/`** сравнивается с полным путём относительно корня синхронизации
+  (`build/*/output`).
+- Исключённое становится невидимым для синхронизатора на обеих сторонах:
+  не передаётся, не удаляется (даже при `delete_mode`), не участвует в
+  конфликтах. Осторожно: ранее синхронизированный файл, попавший под
+  исключение, останется как есть с обеих сторон.
+- Невалидная glob-маска — ошибка валидации конфига при старте.
+
+### Семантика синхронизации
+
+Сначала строится план: для каждого относительного пути выбирается ровно одно
+действие; файл никогда не передаётся в обе стороны за один прогон.
+
+- Файл есть только локально → upload (если разрешён `sync_mode`); иначе —
+  удаление при `delete_mode: local|both`.
+- Файл есть только в облаке → download; иначе — удаление при `remote|both`.
+- Файл есть с двух сторон и различается:
+  - `upload`/`download` — зеркалирование в сторону источника;
+  - `bidirectional` — если по истории видно, что менялась одна сторона,
+    побеждает она; иначе побеждает более поздний mtime, при равном — удалённая версия.
+- **Распространение удалений** (требует `cache_enabled: true`): синхронизированный
+  ранее файл, исчезнувший с одной стороны и не изменившийся на другой, считается
+  удалённым — удаление распространяется, если `delete_mode` это разрешает; иначе
+  файл восстанавливается обратной передачей.
+
+Удаление в облаке выполняется в корзину (`permanently=false`). Директории не
+удаляются — только файлы.
+
+## HTTP-эндпоинты
+
+- `GET /healthz` — живость процесса: `{status, version, uptime, sync_in_progress, last_sync, total_syncs}`
+- `GET /stats` — статистика: счётчики загрузок/скачиваний/пропусков/ошибок, переданные байты, время последней синхронизации.
+
+## Логирование
+
+Консоль — всегда полный вывод. Файловые логи (`log_mode`):
+
+- `off` — отключены;
+- `simple` — итоги сессий: `log_dir/yandex-sync-{timestamp}-s{N}.log`;
+- `extended` — то же + детальный лог каждой операции:
+  `log_dir/detail/yandex-sync-{timestamp}-s{N}.log` (ошибки пишутся потоково).
+
+Ротация — по времени модификации, не более `log_max_files` каждого типа.
 
 ## Разработка
 
-### Локальная разработка
-
 ```bash
-git clone <repository-url>
-cd service-yadisk-api/src
-go mod tidy
-go test ./tests/... -v
-go run ./cmd/sync-tool
+cd src
+go mod download
+go test ./tests/... -v      # все тесты
+go test -race ./tests/      # с race-детектором
+go run .                    # запуск
 ```
 
-### Разработка в Docker
-
-Проект включает docker-compose.yml для разработки с горячей перезагрузкой (используется air).
-
-```bash
-docker-compose up --build
-```
-
-При изменении кода контейнер автоматически пересоберётся и перезапустится.
+При разработке в Docker (`development.yml`) используется CompileDaemon —
+контейнер пересобирается и перезапускается при изменении кода.
 
 ## Сборка под разные платформы
 
-### Общие архитектуры (Linux, macOS, Windows)
-
-Из папки src выполните:
+Из папки `src`:
 
 ```bash
 # Linux amd64
 GOOS=linux GOARCH=amd64 go build -o yandex-sync-linux-amd64 ./
 
-# Linux arm64 (например, Raspberry Pi)
+# Linux arm64 (Raspberry Pi, OpenWrt aarch64)
 GOOS=linux GOARCH=arm64 go build -o yandex-sync-linux-arm64 ./
 
-# Linux armv7
-GOOS=linux GOARCH=arm GOARM=7 go build -o yandex-sync-linux-armv7 ./
+# macOS
+GOOS=darwin GOARCH=arm64 go build -o yandex-sync-darwin-arm64 ./
 
-# macOS amd64
-GOOS=darwin GOARCH=amd64 go build -o yandex-sync-darwin-amd64 ./
-
-# Windows amd64
+# Windows
 GOOS=windows GOARCH=amd64 go build -o yandex-sync-windows-amd64.exe ./
+
+# OpenWrt (статический бинарь, musl)
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o yandex-sync-openwrt-static .
+
+# macOS Apple Silicon (M1/M2/M3/M4)
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o yandex-sync-darwin-arm64 .
 ```
 
-### Сборка для OpenWrt (Chaos Calmer, архитектура aarch64)
+### Запуск на OpenWrt как демон
 
-Для OpenWrt Chaos Calmer 15.05.1 с целевой платформой rtd1295/nas_spi (ARMv8 64-bit) используйте:
-
-```bash
-cd src
-GOOS=linux GOARCH=arm64 CC=aarch64-openwrt-linux-gcc \
-CGO_ENABLED=1 \
-go build -ldflags="-s -w" -o yandex-sync-openwrt ./
-```
-
-> **Примечание:**
-> - Для успешной кросс-компиляции потребуется установить тулчейн OpenWrt для вашей архитектуры
-> - Если используется musl вместо glibc, добавьте тег -tags musl
-> - Для статической сборки (без зависимостей от разделяемых библиотек) используйте CGO_ENABLED=0:
+Готовый procd init-скрипт лежит в `examples/openwrt/init.d/yandex-sync`
+(пример конфига — `examples/openwrt/config.yaml.example`):
 
 ```bash
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o yandex-sync-openwrt-static ./cmd/sync-tool
-```
-
-Статический бинарник будет работать на любом Linux с совместимой архитектурой.
-
-### Установка и запуск на OpenWrt как демона
-
-#### 1. Подготовка
-Скопируйте скомпилированный бинарник (yandex-sync-openwrt) на устройство OpenWrt, например, в /usr/bin/yandex-sync.
-Создайте конфигурационный файл, например, /etc/yandex-sync/config.yaml:
-
-```bash
-mkdir -p /etc/yandex-sync
-cat > /etc/yandex-sync/config.yaml << EOF
-token: "ваш_oauth_токен"
-sync_frequency: "10m"
-folders:
-- local: "/mnt/sdcard/documents"
-  remote: "disk:/backup/documents"
-  sync_mode: "bidirectional"
-  delete_mode: "none"
-EOF
-```
-
-#### 2. Создание init-скрипта
-Создайте файл /etc/init.d/yandex-sync:
-
-```bash
-#!/bin/sh /etc/rc.common
-
-START=99
-STOP=15
-USE_PROCD=1
-
-start_service() {
-procd_open_instance
-procd_set_param command /usr/bin/yandex-sync
-procd_set_param env CONFIG_PATH=/etc/yandex-sync/config.yaml
-procd_set_param respawn
-procd_set_param stdout 1
-procd_set_param stderr 1
-procd_close_instance
-}
-
-stop_service() {
-killall yandex-sync
-}
-```
-
-Сделайте скрипт исполняемым:
-
-```bash
-chmod +x /etc/init.d/yandex-sync
-```
-
-#### 3. Добавление в автозагрузку и запуск
-```bash
+# На устройстве
+scp examples/openwrt/init.d/yandex-sync root@router:/etc/init.d/yandex-sync
+scp yandex-sync-openwrt-static root@router:/usr/bin/yandex-sync
+ssh root@router 'chmod +x /etc/init.d/yandex-sync /usr/bin/yandex-sync \
+  && mkdir -p /etc/yandex-sync'
+# положите конфиг в /etc/yandex-sync/config.yaml
 /etc/init.d/yandex-sync enable
 /etc/init.d/yandex-sync start
 ```
 
-Проверьте статус:
-```bash
-/etc/init.d/yandex-sync status
-```
-
-Логи можно смотреть через logread (если используется syslog) или перенаправив stdout/err в файл через procd_set_param.
-
-#### Альтернативный способ: запуск через cron
-
-Если не нужен полноценный демон, можно добавить задание в cron:
+Команды: `start`, `stop`, `restart`, `status`, а также `reload` —
+мягкая перезагрузка (SIGHUP → graceful exit с сохранением кэша → procd
+поднимает процесс с новым конфигом). Respawn до 5 попыток,
+`term_timeout 30` на корректное завершение, рестарт при изменении
+`config.yaml`. Init-скрипт задаёт через env только пути —
+`CONFIG_PATH`, `CACHE_PATH`, `LOG_DIR` (кэш и логи лежат в
+`/etc/yandex-sync/`, постоянное хранилище, а не tmpfs); режимы
+`log_mode`, `http_port` и прочее настраиваются в `config.yaml`.
 
 ```bash
-crontab -e
+logread | grep yandex-sync          # логи
+curl router:9277/healthz            # живость
 ```
 
-Добавьте строку (запуск каждые 15 минут):
-```text
-*/15 * * * * /usr/bin/yandex-sync -config /etc/yandex-sync/config.yaml >/dev/null 2>&1
+> На OpenWrt `/tmp` — tmpfs: для сохранения логов/кэша после ребута задайте
+> `log_dir` и `cache_path` на постоянное хранилище.
+
+### Запуск на macOS как агент (launchd)
+
+Готовый plist для пользовательского агента лежит в
+`examples/macos/dev.yandexsync.agent.plist` (пример конфига —
+`examples/macos/config.yaml.example`):
+
+```bash
+# Бинарь и конфиг
+sudo cp src/yandex-sync-darwin-arm64 /usr/local/bin/yandex-sync
+sudo chmod +x /usr/local/bin/yandex-sync
+mkdir -p ~/.config/yandex-sync \
+  "$HOME/Library/Application Support/yandex-sync" \
+  "$HOME/Library/Logs/yandex-sync"
+cp examples/macos/config.yaml.example ~/.config/yandex-sync/config.yaml
+# отредактируйте токен и папки в ~/.config/yandex-sync/config.yaml
+
+# Агент (подставляем $HOME в пути — launchd не раскрывает ~ и %h)
+sed "s|__HOME__|$HOME|g" examples/macos/dev.yandexsync.agent.plist > \
+  ~/Library/LaunchAgents/dev.yandexsync.agent.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.yandexsync.agent.plist
 ```
 
-## Мониторинг и логирование
+Управление:
 
-При запуске программа выводит подробные логи:
-
-```text
-=== Starting sync at 15:04:05 ===
-📂 Папка 1/2: /data/docs ↔ disk:/backup/docs (bidirectional, delete: none)
-↑ Загрузка (новый): report.pdf
-⏭️ Пропущено: budget.xlsx
-↓ Скачивание (обновление): presentation.pptx
-🗑️ Удаление локального (отсутствует в облаке): old.txt
-✅ Синхронизация завершена за 2.3s
-↑ Загружено: 1, ↓ Скачано: 1, ⏭️ Пропущено: 1, ❌ Ошибок: 0
+```bash
+launchctl kickstart -k gui/$(id -u)/dev.yandexsync.agent   # рестарт
+launchctl bootout gui/$(id -u)/dev.yandexsync.agent        # выключить
+kill -HUP $(pgrep -f /usr/local/bin/yandex-sync)           # перечитать конфиг
+tail -f ~/Library/Logs/yandex-sync/stdout.log              # консольный вывод
+curl localhost:9277/healthz                                # живость
+curl localhost:9277/stats | jq .current_session            # прогресс
 ```
 
-При использовании Docker логи можно смотреть через docker logs.
+Plist задаёт через env только пути (`CONFIG_PATH`, `CACHE_PATH` →
+`~/Library/Application Support/yandex-sync/cache.json`, `LOG_DIR` →
+`~/Library/Logs/yandex-sync`); режимы настраиваются в `config.yaml`.
+`KeepAlive` перезапускает агент при падении, `ProcessType=Background` +
+`Nice=10` + `LowPriorityIO` делают синхронизацию незаметной для системы.
 
-## Часто задаваемые вопросы
-
-### Как проверить, что программа работает?
-
-- **Локально:** в терминале будут появляться сообщения о синхронизации
-- **В Docker:** `docker logs -f service-yadisk-api` (имя контейнера может отличаться)
-- **На OpenWrt:** `logread | grep yandex-sync`
-
-### Можно ли синхронизировать несколько папок?
-
-Да, в конфигурации можно перечислить сколько угодно папок в секции folders.
-
-### Что происходит при конфликте изменений?
-
-При двусторонней синхронизации программа сравнивает MD5 и время модификации. Если файл изменён с обеих сторон, победит тот, у которого более поздняя дата модификации (при равных датах — загружается удалённый).
-
-### Как остановить синхронизацию?
-
-Нажмите Ctrl+C (в терминале) или выполните `docker-compose down` / `killall yandex-sync`.
+> Агент запускается при входе пользователя. Для работы без логина
+> нужен LaunchDaemon (`/Library/LaunchDaemons`, `UserName`) — по аналогии.
 
 ## Структура проекта
 
 ```text
 service-yadisk-api/
-├── docker/                     # Dockerfile для разработки и продакшена
-├── src/                        # исходный код
-│   ├── cmd/
-│   │   └── sync-tool/
-│   │       └── main.go         # точка входа
+├── src/                        # Go-модуль (module service-yadisk-api)
+│   ├── main.go                 # точка входа
 │   ├── internal/
-│   │   ├── config/             # работа с конфигурацией
-│   │   ├── sync/               # логика синхронизации
-│   │   └── yandex/             # клиент API Яндекс.Диска
-│   ├── tests/                  # тесты
-│   ├── configs/                 # примеры конфигурации
-│   └── go.mod
-├── docker-compose.yml          # Docker Compose для разработки
-├── docker-compose.prod.yml     # Docker Compose для продакшена
+│   │   ├── config/             # конфигурация: YAML + env + валидация
+│   │   ├── yandex/             # REST-клиент cloud-api.yandex.net (ctx + retry)
+│   │   ├── sync/               # merge-проход синхронизации + кэш/история
+│   │   ├── httpapi/            # /healthz, /stats
+│   │   ├── logger/             # файловые логи (simple/extended, ротация)
+│   │   └── models/             # DTO
+│   ├── tests/                  # тесты (мок-клиент + httptest)
+│   └── configs/                # пример конфигурации
+├── Dockerfile                  # продакшен (scratch + CA + upx)
+├── development.dockerfile      # дев (CompileDaemon)
+├── development.yml / production.yml
+├── examples/
+│   ├── openwrt/                # procd init-скрипт + пример конфига
+│   └── macos/                  # launchd plist + пример конфига
 └── README.md
 ```
 
 ## Лицензия
 
-MIT License. Подробнее в файле LICENSE.
+MIT License.

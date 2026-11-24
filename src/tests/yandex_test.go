@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"service-yadisk-api/internal/yandex"
@@ -30,6 +32,7 @@ func (w *TestClientWrapper) Close() {
 }
 
 func TestClient_CreateFolder(t *testing.T) {
+	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Проверяем авторизацию
 		if r.Header.Get("Authorization") != "OAuth test-token" {
@@ -51,13 +54,14 @@ func TestClient_CreateFolder(t *testing.T) {
 	client := NewTestClientWrapper(server)
 	defer client.Close()
 
-	err := client.CreateFolder("disk:/test-folder")
+	err := client.CreateFolder(ctx, "disk:/test-folder")
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
 }
 
 func TestClient_GetResource_Exists(t *testing.T) {
+	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/disk/resources" && r.Method == "GET" {
 			response := `{
@@ -82,7 +86,7 @@ func TestClient_GetResource_Exists(t *testing.T) {
 	client := NewTestClientWrapper(server)
 	defer client.Close()
 
-	resource, err := client.GetResource("disk:/test-file.txt")
+	resource, err := client.GetResource(ctx, "disk:/test-file.txt")
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -110,6 +114,7 @@ func TestClient_GetResource_Exists(t *testing.T) {
 }
 
 func TestClient_GetResource_NotExists(t *testing.T) {
+	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/disk/resources" && r.Method == "GET" {
 			w.WriteHeader(http.StatusNotFound)
@@ -122,7 +127,7 @@ func TestClient_GetResource_NotExists(t *testing.T) {
 	client := NewTestClientWrapper(server)
 	defer client.Close()
 
-	resource, err := client.GetResource("disk:/non-existent-file.txt")
+	resource, err := client.GetResource(ctx, "disk:/non-existent-file.txt")
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -133,6 +138,7 @@ func TestClient_GetResource_NotExists(t *testing.T) {
 }
 
 func TestClient_GetDiskInfo(t *testing.T) {
+	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/disk/" && r.Method == "GET" {
 			response := `{
@@ -156,7 +162,7 @@ func TestClient_GetDiskInfo(t *testing.T) {
 	client := NewTestClientWrapper(server)
 	defer client.Close()
 
-	diskInfo, err := client.GetDiskInfo()
+	diskInfo, err := client.GetDiskInfo(ctx)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -175,6 +181,7 @@ func TestClient_GetDiskInfo(t *testing.T) {
 }
 
 func TestClient_ListFolderResources(t *testing.T) {
+	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/disk/resources" && r.Method == "GET" {
 			// Проверяем параметры запроса
@@ -227,7 +234,7 @@ func TestClient_ListFolderResources(t *testing.T) {
 	client := NewTestClientWrapper(server)
 	defer client.Close()
 
-	resourceList, err := client.ListFolderResources("disk:/test-folder", 20, 0, "path,type,name,size,md5")
+	resourceList, err := client.ListFolderResources(ctx, "disk:/test-folder", 20, 0, "path,type,name,size,md5")
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -251,6 +258,7 @@ func TestClient_ListFolderResources(t *testing.T) {
 }
 
 func TestClient_EnsureFolderExists(t *testing.T) {
+	ctx := context.Background()
 	foldersCreated := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/disk/resources" && r.Method == "GET" {
@@ -292,13 +300,13 @@ func TestClient_EnsureFolderExists(t *testing.T) {
 	defer client.Close()
 
 	// Тест 1: Папка уже существует
-	err := client.EnsureFolderExists("disk:/existing")
+	err := client.EnsureFolderExists(ctx, "disk:/existing")
 	if err != nil {
 		t.Errorf("Expected no error for existing folder, got %v", err)
 	}
 
 	// Тест 2: Папка не существует, должна быть создана
-	err = client.EnsureFolderExists("disk:/new/folder/structure")
+	err = client.EnsureFolderExists(ctx, "disk:/new/folder/structure")
 	if err != nil {
 		t.Errorf("Expected no error for new folder, got %v", err)
 	}
@@ -359,4 +367,72 @@ func TestClient_UploadDownload_Mock(t *testing.T) {
 	// Тест: Проверяем, что методы существуют и вызываются без ошибок
 	// (В реальных тестах нужно было бы мокировать HTTP-клиент)
 	t.Log("Upload/Download API endpoints are correctly defined")
+}
+
+func TestClient_GetAllResources_Pagination(t *testing.T) {
+	ctx := context.Background()
+	const totalFiles = 2500
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/disk/resources" || r.Method != "GET" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("path") != "disk:/big-folder" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		limit := 1000
+		offset := 0
+		fmt.Sscanf(q.Get("offset"), "%d", &offset)
+		if offset >= totalFiles {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		end := offset + limit
+		if end > totalFiles {
+			end = totalFiles
+		}
+		var items []string
+		for i := offset; i < end; i++ {
+			items = append(items, fmt.Sprintf(`{
+				"path": "disk:/big-folder/file%04d.txt",
+				"type": "file",
+				"name": "file%04d.txt",
+				"size": 100,
+				"md5": "md5-%04d",
+				"created": "2023-01-01T00:00:00Z",
+				"modified": "2023-01-01T00:00:00Z",
+				"mime_type": "text/plain"
+			}`, i, i, i))
+		}
+		response := fmt.Sprintf(`{
+			"path": "disk:/big-folder",
+			"type": "dir",
+			"name": "big-folder",
+			"_embedded": {
+				"path": "disk:/big-folder",
+				"items": [%s],
+				"limit": %d,
+				"offset": %d,
+				"total": %d
+			}
+		}`, strings.Join(items, ","), limit, offset, totalFiles)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(response))
+	}))
+	defer server.Close()
+
+	client := NewTestClientWrapper(server)
+	defer client.Close()
+
+	resources, err := client.GetAllResources(ctx, "disk:/big-folder")
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if len(resources) != totalFiles {
+		t.Errorf("Expected %d resources across pages, got %d", totalFiles, len(resources))
+	}
 }

@@ -1,15 +1,16 @@
 services:
   dev-service-yadisk-api:
     container_name: 'dev-service-yadisk-api'
-    build: 
+    build:
       context: .
       dockerfile: development.dockerfile
     ports:
       - '9277:9277'
+    environment:
+      - CONFIG_PATH=/app/configs/config.yaml
     volumes:
       - ./src:/app
       - ./src/configs/config.yaml:/app/configs/config.yaml
-
     restart: unless-stopped
 
 networks:

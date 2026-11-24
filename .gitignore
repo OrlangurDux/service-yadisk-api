@@ -3,3 +3,11 @@ config.yaml
 .DS_Store
 vendor/
 .idea
+# Скомпилированные бинарники и артефакты сборки
+yandex-sync-*
+yadisk-api
+main
+*.yadisk-part
+# Логи и кэш
+*.log
+logs/

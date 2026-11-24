@@ -1,0 +1,24 @@
+# ~/.config/yandex-sync/config.yaml — пример для macOS
+token: "ваш_oauth_токен"
+sync_frequency: "10m"
+
+# Кэш и логи переопределяются plist-ом через env:
+#   CACHE_PATH=~/Library/Application Support/yandex-sync/cache.json
+#   LOG_DIR=~/Library/Logs/yandex-sync
+cache_enabled: true
+
+# Логи сессий: off | simple | extended
+log_mode: "extended"
+
+# Сервер статуса: http://localhost:9277/healthz и /stats
+http_enabled: true
+http_port: 9277
+
+folders:
+  - local: "/Users/you/Documents"
+    remote: "disk:/backup/documents"
+    sync_mode: "bidirectional"   # upload | download | bidirectional
+    delete_mode: "none"          # none | local | remote | both
+    # Исключения по маскам через '|': без '/' — совпадение с именем файла или
+    # папки на любой глубине; с '/' — с полным относительным путём
+    exclude_pattern: "node_modules|cache_*|*.tmp|*.part"

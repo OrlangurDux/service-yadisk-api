@@ -4,10 +4,20 @@ services:
     build: .
     ports:
       - '9277:9277'
+    environment:
+      # Бинарь в scratch-образе лежит в / и ищет конфиг по CONFIG_PATH
+      - CONFIG_PATH=/configs/config.yaml
+      # В scratch нет $HOME — пути кэша и логов задаём явно (на volume ниже)
+      - CACHE_PATH=/data/cache.json
+      - LOG_DIR=/data/logs
     volumes:
-      - ./src:/app
-      - ./src/configs/config.yaml:/app/configs/config.yaml
+      - ./src/configs/config.yaml:/configs/config.yaml:ro
+      # Кэш и логи приложения — вынесены наружу, чтобы переживать пересоздание
+      - yadisk-cache:/data
     restart: always
+
+volumes:
+  yadisk-cache:
 
 networks:
   default:

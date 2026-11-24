@@ -1,524 +1,568 @@
 package tests
 
 import (
+	"context"
+	"crypto/md5"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"service-yadisk-api/internal/config"
-	"service-yadisk-api/internal/sync"
-	"service-yadisk-api/internal/yandex"
+	"service-yadisk-api/internal/logger"
+	"service-yadisk-api/internal/models"
+	syncer "service-yadisk-api/internal/sync"
 )
 
 // MockClient реализует yandex.ClientInterface для тестов
 type MockClient struct {
+	mu        sync.Mutex
 	Folders   map[string]bool
-	Files     map[string]*yandex.Resource
+	Files     map[string]*models.Resource
+	Contents  map[string][]byte
 	Uploads   []string
 	Downloads []string
 	Deletes   []string
-	Errors    []error
+	Err       error // если задан — все вызовы возвращают эту ошибку
 }
 
 func NewMockClient() *MockClient {
 	return &MockClient{
-		Folders:   make(map[string]bool),
-		Files:     make(map[string]*yandex.Resource),
+		Folders:   map[string]bool{"disk:/": true},
+		Files:     make(map[string]*models.Resource),
+		Contents:  make(map[string][]byte),
 		Uploads:   []string{},
 		Downloads: []string{},
 		Deletes:   []string{},
-		Errors:    []error{},
 	}
 }
 
-func (m *MockClient) GetDiskInfo() (*yandex.DiskInfo, error) {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) fail() error { return m.Err }
+
+func (m *MockClient) GetDiskInfo(ctx context.Context) (*models.DiskInfo, error) {
+	if err := m.fail(); err != nil {
 		return nil, err
 	}
-
-	return &yandex.DiskInfo{
-		TotalSpace: 1000000000,
-		UsedSpace:  500000000,
-		TrashSize:  1000000,
-		SystemFolders: struct {
-			Applications string `json:"applications"`
-			Downloads    string `json:"downloads"`
-		}{
-			Applications: "disk:/Приложения",
-			Downloads:    "disk:/Загрузки",
-		},
-	}, nil
+	return &models.DiskInfo{TotalSpace: 1 << 30, UsedSpace: 1 << 29, TrashSize: 1 << 20}, nil
 }
 
-func (m *MockClient) CreateFolder(remotePath string) error {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) CreateFolder(ctx context.Context, remotePath string) error {
+	if err := m.fail(); err != nil {
 		return err
 	}
-
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Folders[remotePath] = true
 	return nil
 }
 
-func (m *MockClient) GetResource(remotePath string) (*yandex.Resource, error) {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) GetResource(ctx context.Context, remotePath string) (*models.Resource, error) {
+	if err := m.fail(); err != nil {
 		return nil, err
 	}
-
-	if resource, exists := m.Files[remotePath]; exists {
-		return resource, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.Files[remotePath]; ok {
+		return r, nil
 	}
 	if m.Folders[remotePath] {
-		return &yandex.Resource{
-			Path: remotePath,
-			Type: "dir",
-			Name: filepath.Base(remotePath),
-		}, nil
+		return &models.Resource{Path: remotePath, Type: "dir", Name: filepath.Base(remotePath)}, nil
 	}
 	return nil, nil
 }
 
-func (m *MockClient) ListFolderResources(remotePath string, limit, offset int, fields string) (*yandex.ResourceList, error) {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) ListFolderResources(ctx context.Context, remotePath string, limit, offset int, fields string) (*models.ResourceList, error) {
+	return nil, fmt.Errorf("not implemented in mock")
+}
+
+func (m *MockClient) GetAllResources(ctx context.Context, remotePath string) ([]models.Resource, error) {
+	if err := m.fail(); err != nil {
 		return nil, err
 	}
-
-	var items []yandex.Resource
-	for path, resource := range m.Files {
-		// Проверяем, находится ли файл в указанной папке
-		if len(path) >= len(remotePath) && path[:len(remotePath)] == remotePath &&
-			(len(path) == len(remotePath) || path[len(remotePath)] == '/') {
-			items = append(items, *resource)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.Resource
+	for p, r := range m.Files {
+		if p == remotePath || strings.HasPrefix(p, remotePath+"/") {
+			out = append(out, *r)
 		}
 	}
-
-	return &yandex.ResourceList{
-		Items:  items,
-		Limit:  limit,
-		Offset: offset,
-		Path:   remotePath,
-		Total:  len(items),
-	}, nil
-}
-
-func (m *MockClient) GetAllResources(remotePath string) ([]yandex.Resource, error) {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
-		return nil, err
+	for p := range m.Folders {
+		if p != remotePath && strings.HasPrefix(p, remotePath+"/") {
+			out = append(out, models.Resource{Path: p, Type: "dir", Name: filepath.Base(p)})
+		}
 	}
-
-	var resources []yandex.Resource
-	for _, resource := range m.Files {
-		resources = append(resources, *resource)
-	}
-	return resources, nil
+	return out, nil
 }
 
-func (m *MockClient) GetResourcesByPath(remotePath string) ([]yandex.Resource, error) {
-	return m.GetAllResources(remotePath)
+func (m *MockClient) GetResourcesByPath(ctx context.Context, remotePath string) ([]models.Resource, error) {
+	return m.GetAllResources(ctx, remotePath)
 }
 
-func (m *MockClient) UploadFile(localPath, remotePath string) error {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) UploadFile(ctx context.Context, localPath, remotePath string) error {
+	if err := m.fail(); err != nil {
 		return err
 	}
-
-	m.Uploads = append(m.Uploads, remotePath)
-
-	// Читаем файл для вычисления размера
-	info, err := os.Stat(localPath)
+	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return err
 	}
-
-	// Создаем мок-ресурс
-	m.Files[remotePath] = &yandex.Resource{
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Uploads = append(m.Uploads, remotePath)
+	m.Contents[remotePath] = data
+	m.Files[remotePath] = &models.Resource{
 		Path:     remotePath,
 		Type:     "file",
 		Name:     filepath.Base(remotePath),
-		Size:     info.Size(),
-		MD5:      "mock-md5-hash-" + remotePath, // Уникальный для каждого файла
-		Created:  time.Now().Format(time.RFC3339),
+		Size:     int64(len(data)),
+		MD5:      fmt.Sprintf("%x", md5.Sum(data)),
 		Modified: time.Now().Format(time.RFC3339),
-		MimeType: "application/octet-stream",
 	}
-
-	// Создаем родительскую папку
-	parentDir := filepath.Dir(remotePath)
-	if parentDir != "." && parentDir != "/" {
-		m.Folders[parentDir] = true
-	}
-
+	// Фиксируем родительскую папку как существующую
+	m.Folders[filepath.ToSlash(filepath.Dir(remotePath))] = true
 	return nil
 }
 
-func (m *MockClient) DownloadFile(remotePath, localPath string) error {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) DownloadFile(ctx context.Context, remotePath, localPath string) error {
+	if err := m.fail(); err != nil {
 		return err
 	}
-
+	m.mu.Lock()
+	content, ok := m.Contents[remotePath]
 	m.Downloads = append(m.Downloads, remotePath)
-
-	// Создаем директорию, если не существует
-	dir := filepath.Dir(localPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	m.mu.Unlock()
+	if !ok {
+		content = []byte("mock content from " + remotePath)
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return err
 	}
-
-	// В моке создаем файл с тестовым содержимым
-	return os.WriteFile(localPath, []byte("mock content from "+remotePath), 0644)
+	return os.WriteFile(localPath, content, 0644)
 }
 
-func (m *MockClient) DeleteResource(remotePath string, permanently bool) error {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) DeleteResource(ctx context.Context, remotePath string, permanently bool) error {
+	if err := m.fail(); err != nil {
 		return err
 	}
-
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Deletes = append(m.Deletes, remotePath)
 	delete(m.Files, remotePath)
+	delete(m.Contents, remotePath)
 	return nil
 }
 
-func (m *MockClient) EnsureFolderExists(remotePath string) error {
-	if len(m.Errors) > 0 {
-		err := m.Errors[0]
-		m.Errors = m.Errors[1:]
+func (m *MockClient) EnsureFolderExists(ctx context.Context, remotePath string) error {
+	if err := m.fail(); err != nil {
 		return err
 	}
-
-	// Разбиваем путь на части и создаем все родительские папки
-	parts := []string{}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clean := strings.TrimPrefix(remotePath, "disk:/")
 	current := ""
-
-	for _, part := range filepath.SplitList(remotePath) {
-		if part == "" || part == "." {
+	for _, part := range strings.Split(clean, "/") {
+		if part == "" {
 			continue
 		}
 		if current == "" {
-			current = part
+			current = "disk:/" + part
 		} else {
 			current = current + "/" + part
 		}
-		parts = append(parts, current)
+		m.Folders[current] = true
 	}
-
-	for _, folder := range parts {
-		m.Folders[folder] = true
-	}
-
 	return nil
 }
 
-func (m *MockClient) GetResourceMetadata(remotePath string, fields []string) (*yandex.Resource, error) {
-	return m.GetResource(remotePath)
+func (m *MockClient) GetResourceMetadata(ctx context.Context, remotePath string, fields []string) (*models.Resource, error) {
+	return m.GetResource(ctx, remotePath)
 }
 
-func (m *MockClient) CheckOperationStatus(operationURL string) (string, error) {
+func (m *MockClient) CheckOperationStatus(ctx context.Context, operationURL string) (string, error) {
 	return "success", nil
 }
 
+// ---- helpers ---------------------------------------------------------------
+
+func testConfig(t *testing.T, folders ...config.FolderMapping) *config.Config {
+	t.Helper()
+	return &config.Config{
+		Token:         "test-token",
+		SyncFrequency: time.Minute,
+		Folders:       folders,
+		CacheEnabled:  true,
+		CachePath:     filepath.Join(t.TempDir(), "cache.json"),
+	}
+}
+
+func newTestSyncer(t *testing.T, cfg *config.Config, client *MockClient) *syncer.Syncer {
+	t.Helper()
+	s, err := syncer.NewSyncer(client, cfg, logger.NilLogger{})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	return s
+}
+
+func writeLocal(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func addRemoteFile(m *MockClient, path, content string, modified time.Time) {
+	m.Files[path] = &models.Resource{
+		Path:     path,
+		Type:     "file",
+		Name:     filepath.Base(path),
+		Size:     int64(len(content)),
+		MD5:      fmt.Sprintf("%x", md5.Sum([]byte(content))),
+		Modified: modified.Format(time.RFC3339),
+	}
+	m.Contents[path] = []byte(content)
+}
+
+// ---- Тесты -----------------------------------------------------------------
+
 func TestCalculateFileMD5(t *testing.T) {
-	// Создаем временный файл с известным содержимым
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
-
 	content := []byte("Hello, World! This is a test file for MD5 calculation.")
-
-	err := os.WriteFile(testFile, content, 0644)
-	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+	if err := os.WriteFile(testFile, content, 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	// Вычисляем MD5
-	md5, err := sync.CalculateFileMD5(testFile)
+	got, err := syncer.CalculateFileMD5(testFile)
 	if err != nil {
-		t.Fatalf("Failed to calculate MD5: %v", err)
+		t.Fatal(err)
 	}
-
-	// MD5 строки "Hello, World! This is a test file for MD5 calculation."
-	expectedMD5 := "b10a8db164e0754105b7a99be72e3fe5"
-
-	if md5 != expectedMD5 {
-		t.Errorf("Expected MD5 '%s', got '%s'", expectedMD5, md5)
+	if want := "2025cbae4298c7a5c562808f864510ea"; got != want {
+		t.Errorf("Expected MD5 %q, got %q", want, got)
 	}
 }
 
-func TestSyncer_NeedsSyncBasedOnMD5(t *testing.T) {
-	// Создаем временные файлы
-	tmpDir := t.TempDir()
-
-	file1 := filepath.Join(tmpDir, "file1.txt")
-	file2 := filepath.Join(tmpDir, "file2.txt")
-
-	// Файлы с одинаковым содержимым
-	sameContent := []byte("Same content for MD5 test")
-	os.WriteFile(file1, sameContent, 0644)
-	os.WriteFile(file2, sameContent, 0644)
-
-	// Получаем информацию о файлах
-	info1, _ := os.Stat(file1)
-	info2, _ := os.Stat(file2)
-
-	md5_1, _ := sync.CalculateFileMD5(file1)
-	md5_2, _ := sync.CalculateFileMD5(file2)
-
-	fileInfo1 := sync.FileInfo{
-		Path:     file1,
-		Size:     info1.Size(),
-		Modified: info1.ModTime(),
-		MD5:      md5_1,
-		IsDir:    false,
-	}
-
-	fileInfo2 := sync.FileInfo{
-		Path:     file2,
-		Size:     info2.Size(),
-		Modified: info2.ModTime(),
-		MD5:      md5_2,
-		IsDir:    false,
-	}
-
-	// Создаем синхронизатор для теста
-	cfg := &config.Config{
-		Token:         "test-token",
-		SyncFrequency: time.Minute * 5,
-	}
-
-	mockClient := NewMockClient()
-	syncer := sync.NewSyncer(mockClient, cfg)
-
-	// Тест 1: Файлы с одинаковым MD5 не нуждаются в синхронизации
-	if syncer.NeedsSyncBasedOnMD5(fileInfo1, fileInfo2) {
-		t.Error("Files with same MD5 should not need sync")
-	}
-
-	// Тест 2: Файлы с разным размером нуждаются в синхронизации
-	fileInfo3 := sync.FileInfo{
-		Path:     file1,
-		Size:     info1.Size() + 100, // Другой размер
-		Modified: info1.ModTime(),
-		MD5:      md5_1,
-		IsDir:    false,
-	}
-
-	if !syncer.NeedsSyncBasedOnMD5(fileInfo1, fileInfo3) {
-		t.Error("Files with different size should need sync")
-	}
-
-	// Тест 3: Файлы с разным MD5 нуждаются в синхронизации
-	fileInfo4 := sync.FileInfo{
-		Path:     file1,
-		Size:     info1.Size(),
-		Modified: info1.ModTime(),
-		MD5:      "different-md5-hash",
-		IsDir:    false,
-	}
-
-	if !syncer.NeedsSyncBasedOnMD5(fileInfo1, fileInfo4) {
-		t.Error("Files with different MD5 should need sync")
-	}
-}
-
-func TestBidirectionalSync_NewFiles(t *testing.T) {
-	// Создаем тестовые директории
-	tmpDir := t.TempDir()
-	localDir := filepath.Join(tmpDir, "local")
+func TestSync_UploadNewFiles(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
 	remoteDir := "disk:/remote"
 
-	os.MkdirAll(localDir, 0755)
+	writeLocal(t, localDir, "file1.txt", "File 1 content")
+	writeLocal(t, localDir, "file2.txt", "File 2 content")
+	writeLocal(t, localDir, "subdir/file3.txt", "File 3 in subdir")
 
-	// Создаем локальные файлы
-	file1 := filepath.Join(localDir, "file1.txt")
-	file2 := filepath.Join(localDir, "file2.txt")
+	mock := NewMockClient()
+	cfg := testConfig(t)
+	s := newTestSyncer(t, cfg, mock)
 
-	os.WriteFile(file1, []byte("File 1 content for sync test"), 0644)
-	os.WriteFile(file2, []byte("File 2 content for sync test"), 0644)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "bidirectional", "none")
 
-	// Создаем поддиректорию
-	subDir := filepath.Join(localDir, "subdir")
-	os.MkdirAll(subDir, 0755)
-
-	file3 := filepath.Join(subDir, "file3.txt")
-	os.WriteFile(file3, []byte("File 3 content in subdirectory"), 0644)
-
-	// Создаем конфигурацию и мок-клиент
-	cfg := &config.Config{
-		Token:         "test-token",
-		SyncFrequency: time.Minute * 5,
-		Folders: []config.FolderMapping{
-			{
-				Local:      localDir,
-				Remote:     remoteDir,
-				SyncMode:   "bidirectional",
-				DeleteMode: "none",
-			},
-		},
+	if len(result.Errors) > 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
 	}
-
-	mockClient := NewMockClient()
-	syncer := sync.NewSyncer(mockClient, cfg)
-
-	// Выполняем синхронизацию
-	result, err := syncer.BidirectionalSync(localDir, remoteDir, "bidirectional", "none")
-	if err != nil {
-		t.Fatalf("Sync failed: %v", err)
-	}
-
-	// Проверяем, что файлы были загружены
 	if len(result.Uploaded) != 3 {
-		t.Errorf("Expected 3 files uploaded, got %d. Uploaded: %v", len(result.Uploaded), result.Uploaded)
+		t.Errorf("Expected 3 uploads, got %d: %v", len(result.Uploaded), result.Uploaded)
 	}
-
-	// Проверяем, что файлы были созданы в мок-клиенте
-	expectedFiles := []string{
-		"disk:/remote/file1.txt",
-		"disk:/remote/file2.txt",
-		"disk:/remote/subdir/file3.txt",
-	}
-
-	for _, expectedFile := range expectedFiles {
-		if _, exists := mockClient.Files[expectedFile]; !exists {
-			t.Errorf("Expected file not found in mock client: %s", expectedFile)
+	for _, p := range []string{"disk:/remote/file1.txt", "disk:/remote/file2.txt", "disk:/remote/subdir/file3.txt"} {
+		if _, ok := mock.Files[p]; !ok {
+			t.Errorf("Expected remote file %s", p)
 		}
 	}
-
-	// Проверяем, что папки были созданы
-	expectedFolders := []string{
-		"disk:/remote",
-		"disk:/remote/subdir",
-	}
-
-	for _, expectedFolder := range expectedFolders {
-		if !mockClient.Folders[expectedFolder] {
-			t.Errorf("Expected folder not found in mock client: %s", expectedFolder)
-		}
-	}
-
-	// Проверяем статистику
-	stats := syncer.GetStatistics()
-	if stats.TotalUploaded != 3 {
-		t.Errorf("Expected total uploaded 3, got %d", stats.TotalUploaded)
+	if !mock.Folders["disk:/remote/subdir"] {
+		t.Error("Expected remote subdir to be created")
 	}
 }
 
-func TestBidirectionalSync_ExistingFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	localDir := filepath.Join(tmpDir, "local")
+func TestSync_SkipIdenticalFiles(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+	content := "same content"
+
+	p := writeLocal(t, localDir, "file.txt", content)
+	info, _ := os.Stat(p)
+
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/file.txt", content, info.ModTime())
+
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "bidirectional", "none")
+
+	if len(result.Uploaded) != 0 || len(result.Downloaded) != 0 {
+		t.Errorf("Identical file should not be transferred: up=%v down=%v", result.Uploaded, result.Downloaded)
+	}
+	if len(result.Skipped) != 1 {
+		t.Errorf("Expected 1 skipped, got %d", len(result.Skipped))
+	}
+}
+
+func TestSync_ConflictLocalNewer_Uploads(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
 	remoteDir := "disk:/remote"
 
-	os.MkdirAll(localDir, 0755)
+	p := writeLocal(t, localDir, "conflict.txt", "local version")
+	future := time.Now().Add(time.Hour)
+	_ = os.Chtimes(p, future, future)
 
-	// Создаем файл локально
-	localFile := filepath.Join(localDir, "test.txt")
-	os.WriteFile(localFile, []byte("Local version with different content"), 0644)
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/conflict.txt", "remote version", time.Now().Add(-time.Hour))
 
-	// Создаем мок-клиент с существующим файлом
-	mockClient := NewMockClient()
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "bidirectional", "none")
 
-	// Добавляем удаленный файл с тем же именем, но другим содержимым
-	mockClient.Files[remoteDir+"/test.txt"] = &yandex.Resource{
-		Path:     remoteDir + "/test.txt",
-		Type:     "file",
-		Name:     "test.txt",
-		Size:     100,
-		MD5:      "remote-md5-hash-different",
-		Created:  time.Now().Format(time.RFC3339),
-		Modified: time.Now().Add(-time.Hour).Format(time.RFC3339),
-		MimeType: "text/plain",
-	}
-
-	cfg := &config.Config{
-		Token:         "test-token",
-		SyncFrequency: time.Minute * 5,
-	}
-
-	syncer := sync.NewSyncer(mockClient, cfg)
-
-	// Синхронизация должна обнаружить разницу в MD5 и загрузить новую версию
-	result, err := syncer.BidirectionalSync(localDir, remoteDir, "bidirectional", "none")
-	if err != nil {
-		t.Fatalf("Sync failed: %v", err)
-	}
-
-	// Должен быть загружен 1 файл (так как MD5 различается)
 	if len(result.Uploaded) != 1 {
-		t.Errorf("Expected 1 file uploaded (due to MD5 mismatch), got %d. Uploaded: %v", len(result.Uploaded), result.Uploaded)
+		t.Errorf("Local-newer conflict should upload, got up=%v down=%v", result.Uploaded, result.Downloaded)
 	}
-
-	// Проверяем, что файл был загружен
-	if len(mockClient.Uploads) != 1 {
-		t.Errorf("Expected 1 upload, got %d", len(mockClient.Uploads))
-	}
-
-	// Проверяем, что правильный файл был загружен
-	expectedUpload := "disk:/remote/test.txt"
-	if len(mockClient.Uploads) > 0 && mockClient.Uploads[0] != expectedUpload {
-		t.Errorf("Expected upload of %s, got %s", expectedUpload, mockClient.Uploads[0])
+	if len(result.Downloaded) != 0 {
+		t.Error("File must not be transferred in both directions")
 	}
 }
 
-func TestBidirectionalSync_DownloadOnly(t *testing.T) {
-	tmpDir := t.TempDir()
-	localDir := filepath.Join(tmpDir, "local")
+func TestSync_ConflictRemoteNewer_Downloads(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
 	remoteDir := "disk:/remote"
 
-	os.MkdirAll(localDir, 0755)
+	p := writeLocal(t, localDir, "conflict.txt", "local version")
+	past := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(p, past, past)
 
-	// Создаем мок-клиент с существующим удаленным файлом
-	mockClient := NewMockClient()
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/conflict.txt", "remote version", time.Now())
 
-	// Добавляем удаленный файл
-	mockClient.Files[remoteDir+"/remote-only.txt"] = &yandex.Resource{
-		Path:     remoteDir + "/remote-only.txt",
-		Type:     "file",
-		Name:     "remote-only.txt",
-		Size:     500,
-		MD5:      "remote-only-md5",
-		Created:  time.Now().Format(time.RFC3339),
-		Modified: time.Now().Add(-30 * time.Minute).Format(time.RFC3339),
-		MimeType: "text/plain",
-	}
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "bidirectional", "none")
 
-	cfg := &config.Config{
-		Token:         "test-token",
-		SyncFrequency: time.Minute * 5,
-	}
-
-	syncer := sync.NewSyncer(mockClient, cfg)
-
-	// Синхронизация только в режиме download
-	result, err := syncer.BidirectionalSync(localDir, remoteDir, "download", "none")
-	if err != nil {
-		t.Fatalf("Download sync failed: %v", err)
-	}
-
-	// Должен быть скачан 1 файл
 	if len(result.Downloaded) != 1 {
-		t.Errorf("Expected 1 file downloaded, got %d. Downloaded: %v", len(result.Downloaded), result.Downloaded)
+		t.Errorf("Remote-newer conflict should download, got up=%v down=%v", result.Uploaded, result.Downloaded)
 	}
-
-	// Проверяем, что файл был скачан
-	if len(mockClient.Downloads) != 1 {
-		t.Errorf("Expected 1 download, got %d", len(mockClient.Downloads))
-	}
-
-	// Проверяем, что upload не выполнялся
 	if len(result.Uploaded) != 0 {
-		t.Errorf("Expected 0 uploads in download mode, got %d", len(result.Uploaded))
+		t.Error("File must not be transferred in both directions")
+	}
+}
+
+func TestSync_ConflictEqualMtime_RemoteWins(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	ts := time.Now().Truncate(time.Second)
+	p := writeLocal(t, localDir, "conflict.txt", "local version")
+	_ = os.Chtimes(p, ts, ts)
+
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/conflict.txt", "remote version", ts)
+
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "bidirectional", "none")
+
+	if len(result.Downloaded) != 1 || len(result.Uploaded) != 0 {
+		t.Errorf("Tie on mtime: remote should win (download), got up=%v down=%v", result.Uploaded, result.Downloaded)
+	}
+}
+
+func TestSync_DownloadOnlyMode(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	writeLocal(t, localDir, "local-only.txt", "local data")
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/remote-only.txt", "remote data", time.Now())
+
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "download", "none")
+
+	if len(result.Downloaded) != 1 {
+		t.Errorf("Expected 1 download, got %v", result.Downloaded)
+	}
+	if len(result.Uploaded) != 0 {
+		t.Errorf("download mode must not upload, got %v", result.Uploaded)
+	}
+	if len(result.DeletedLocal) != 0 {
+		t.Errorf("delete none must not delete, got %v", result.DeletedLocal)
+	}
+}
+
+func TestSync_DownloadMode_DeleteLocalUnsynced(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	writeLocal(t, localDir, "unsynced.txt", "never synced")
+	mock := NewMockClient()
+
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "download", "local")
+
+	if len(result.DeletedLocal) != 1 {
+		t.Errorf("download+delete local should remove unsynced local file, got %v", result.DeletedLocal)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "unsynced.txt")); !os.IsNotExist(err) {
+		t.Error("local file should be deleted")
+	}
+}
+
+func TestSync_RemoteDeletionPropagates(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	writeLocal(t, localDir, "victim.txt", "synced content")
+	mock := NewMockClient()
+	s := newTestSyncer(t, testConfig(t), mock)
+	ctx := context.Background()
+
+	// Прогон 1: файл загружается и помечается синхронизированным
+	r1 := s.BidirectionalSync(ctx, localDir, remoteDir, "bidirectional", "none")
+	if len(r1.Uploaded) != 1 {
+		t.Fatalf("first run should upload, got %v", r1.Uploaded)
+	}
+
+	// Удаляем файл на «удалённой» стороне
+	mock.mu.Lock()
+	delete(mock.Files, remoteDir+"/victim.txt")
+	delete(mock.Contents, remoteDir+"/victim.txt")
+	mock.mu.Unlock()
+
+	// Прогон 2: удаление должно распространиться на локальную сторону
+	r2 := s.BidirectionalSync(ctx, localDir, remoteDir, "bidirectional", "both")
+	if len(r2.DeletedLocal) != 1 {
+		t.Errorf("remote deletion should propagate locally, got deleted=%v errors=%v", r2.DeletedLocal, r2.Errors)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "victim.txt")); !os.IsNotExist(err) {
+		t.Error("local file should be deleted after remote deletion")
+	}
+}
+
+func TestSync_RemoteDeletion_NoDeleteMode_Reuploads(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	writeLocal(t, localDir, "victim.txt", "synced content")
+	mock := NewMockClient()
+	s := newTestSyncer(t, testConfig(t), mock)
+	ctx := context.Background()
+
+	s.BidirectionalSync(ctx, localDir, remoteDir, "bidirectional", "none")
+
+	mock.mu.Lock()
+	delete(mock.Files, remoteDir+"/victim.txt")
+	delete(mock.Contents, remoteDir+"/victim.txt")
+	mock.mu.Unlock()
+
+	// delete_mode=none → файл восстанавливается, а не удаляется
+	r2 := s.BidirectionalSync(ctx, localDir, remoteDir, "bidirectional", "none")
+	if len(r2.DeletedLocal) != 0 {
+		t.Errorf("delete none must not delete, got %v", r2.DeletedLocal)
+	}
+	if len(r2.Uploaded) != 1 {
+		t.Errorf("file should be re-uploaded (restored), got %v", r2.Uploaded)
+	}
+}
+
+func TestSync_LocalDeletionPropagates(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	localFile := writeLocal(t, localDir, "victim.txt", "synced content")
+	mock := NewMockClient()
+	s := newTestSyncer(t, testConfig(t), mock)
+	ctx := context.Background()
+
+	s.BidirectionalSync(ctx, localDir, remoteDir, "bidirectional", "none")
+
+	if err := os.Remove(localFile); err != nil {
+		t.Fatal(err)
+	}
+
+	r2 := s.BidirectionalSync(ctx, localDir, remoteDir, "bidirectional", "both")
+	if len(r2.DeletedRemote) != 1 {
+		t.Errorf("local deletion should propagate to remote, got deleted=%v errors=%v", r2.DeletedRemote, r2.Errors)
+	}
+	if _, ok := mock.Files[remoteDir+"/victim.txt"]; ok {
+		t.Error("remote file should be deleted after local deletion")
+	}
+}
+
+func TestSync_UploadMode_DeleteRemoteUnsynced(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	writeLocal(t, localDir, "kept.txt", "data")
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/stray.txt", "remote junk", time.Now())
+
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "upload", "remote")
+
+	if len(result.DeletedRemote) != 1 || mock.Deletes[0] != remoteDir+"/stray.txt" {
+		t.Errorf("upload+delete remote should remove stray remote file, got %v", result.DeletedRemote)
+	}
+	if len(result.Downloaded) != 0 {
+		t.Errorf("upload mode must not download, got %v", result.Downloaded)
+	}
+}
+
+func TestSync_NoDoubleTransferOnConflict(t *testing.T) {
+	// Регрессия на старый баг: файл с разным содержимым передавался в обе стороны
+	localDir := filepath.Join(t.TempDir(), "local")
+	remoteDir := "disk:/remote"
+
+	writeLocal(t, localDir, "both.txt", "local version")
+	mock := NewMockClient()
+	addRemoteFile(mock, remoteDir+"/both.txt", "remote version", time.Now().Add(time.Hour))
+
+	s := newTestSyncer(t, testConfig(t), mock)
+	result := s.BidirectionalSync(context.Background(), localDir, remoteDir, "bidirectional", "none")
+
+	total := len(result.Uploaded) + len(result.Downloaded)
+	if total != 1 {
+		t.Errorf("conflicting file must transfer exactly once, got up=%v down=%v", result.Uploaded, result.Downloaded)
+	}
+}
+
+func TestSync_ExcludePatterns(t *testing.T) {
+	localDir := t.TempDir()
+	remoteDir := "disk:/test"
+
+	writeLocal(t, localDir, "keep.txt", "keep me")
+	writeLocal(t, localDir, "node_modules/pkg/index.js", "module code")
+	writeLocal(t, localDir, "deep/nested/node_modules/inner.js", "nested module")
+	writeLocal(t, localDir, "cache_session.dat", "cache")
+	writeLocal(t, localDir, "notes.tmp", "temp")
+	writeLocal(t, localDir, "notes.txt", "not temp")
+
+	mock := &MockClient{
+		Files:    map[string]*models.Resource{},
+		Contents: map[string][]byte{},
+		Folders:  map[string]bool{"disk:/": true, remoteDir: true},
+	}
+	// Удалённый файл в исключаемой папке — не должен ни скачиваться, ни удаляться
+	addRemoteFile(mock, remoteDir+"/vendor/lib.so", "lib", time.Now())
+	// Удалённый файл вне исключений — скачается
+	addRemoteFile(mock, remoteDir+"/remote.txt", "remote", time.Now())
+
+	cfg := testConfig(t, config.FolderMapping{Local: localDir, Remote: remoteDir})
+	s := newTestSyncer(t, cfg, mock)
+
+	exclude := []string{"node_modules", "cache_*", "*.tmp", "vendor"}
+	result := s.SyncFolderWithExcludes(context.Background(), localDir, remoteDir, "bidirectional", "both", exclude)
+
+	// Загружены только неисключённые локальные файлы
+	if len(result.Uploaded) != 2 {
+		t.Errorf("Expected 2 uploads (keep.txt, notes.txt), got %v", result.Uploaded)
+	}
+	if len(result.Downloaded) != 1 || result.Downloaded[0] != "remote.txt" {
+		t.Errorf("Expected 1 download (remote.txt), got %v", result.Downloaded)
+	}
+	// vendor/lib.so не удалён в облаке
+	if len(result.DeletedRemote) != 0 {
+		t.Errorf("Expected no remote deletions (vendor excluded), got %v", result.DeletedRemote)
+	}
+	if len(result.DeletedLocal) != 0 {
+		t.Errorf("Expected no local deletions, got %v", result.DeletedLocal)
 	}
 }

@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
-	"service-yadisk-api/internal/logger"
 	"syscall"
 	"time"
 
 	"service-yadisk-api/internal/config"
+	"service-yadisk-api/internal/httpapi"
+	"service-yadisk-api/internal/logger"
 	"service-yadisk-api/internal/sync"
 	"service-yadisk-api/internal/yandex"
 )
@@ -24,81 +26,68 @@ func main() {
 	log.Printf("Starting Yandex.Disk Sync Tool v%s (%s, built %s)",
 		Version, CommitHash, BuildDate)
 
-	// Определение пути к конфигурационному файлу
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
 		configPath = "configs/config.yaml"
 	}
 
-	// Загрузка конфигурации
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config from %s: %v", configPath, err)
 	}
 
-	// Приоритет токена из переменной окружения
-	if envToken := os.Getenv("YANDEX_TOKEN"); envToken != "" {
-		cfg.Token = envToken
-	}
-
-	if cfg.Token == "" || cfg.Token == "your_oauth_token_here" {
-		log.Fatal("Yandex.Disk token is not configured. Please set YANDEX_TOKEN environment variable or update config.yaml")
-	}
-
-	// Создаём логгер (в /tmp, макс. 5 файлов)
-	fileLogger, err := logger.NewFileLogger("/tmp", 5)
+	fileLogger, err := logger.NewFileLogger(cfg.LogDir, cfg.LogMaxFiles, cfg.LogMode)
 	if err != nil {
 		log.Fatalf("Не удалось создать логгер: %v", err)
 	}
 	defer fileLogger.Close()
 
-	// Создание клиента Яндекс.Диска
 	client := yandex.NewClient(cfg.Token)
 
-	// Проверка подключения и получение информации о диске
 	startTime := time.Now()
-	diskInfo, err := client.GetDiskInfo()
+	diskInfo, err := client.GetDiskInfo(context.Background())
 	if err != nil {
 		log.Fatalf("Failed to connect to Yandex.Disk: %v", err)
 	}
-	connectionTime := time.Since(startTime)
 
-	log.Printf("✓ Connected to Yandex.Disk in %v", connectionTime)
+	log.Printf("✓ Connected to Yandex.Disk in %v", time.Since(startTime))
 	log.Printf("  Total space: %.2f GB", float64(diskInfo.TotalSpace)/(1024*1024*1024))
 	log.Printf("  Used space: %.2f GB (%.1f%%)",
 		float64(diskInfo.UsedSpace)/(1024*1024*1024),
 		float64(diskInfo.UsedSpace)/float64(diskInfo.TotalSpace)*100)
-	log.Printf("  Trash size: %.2f MB", float64(diskInfo.TrashSize)/(1024*1024))
 
-	// Создание синхронизатора
 	syncer, err := sync.NewSyncer(client, cfg, fileLogger)
 	if err != nil {
 		log.Fatalf("Failed to create syncer: %v", err)
 	}
 
-	// Обработка graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	// Graceful shutdown: сигнал → отмена ctx → syncer завершает итерацию и выходит
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
 
-	go func() {
-		sig := <-sigChan
-		log.Printf("Received signal: %v", sig)
-		log.Println("Shutting down sync service gracefully...")
+	// HTTP-сервер статуса (/healthz, /stats)
+	var httpServer *httpapi.Server
+	if cfg.IsHTTPEnabled() {
+		httpServer = httpapi.NewServer(cfg.HTTPPort, syncer, Version)
+		httpServer.Start()
+	}
 
-		// Здесь можно добавить логику для корректного завершения
-		// Например, завершение текущей синхронизации
-
-		os.Exit(0)
-	}()
-
-	// Запуск сервиса синхронизации
 	log.Printf("Starting sync service with frequency: %v", cfg.SyncFrequency)
 	log.Printf("Configured %d folder(s) for synchronization", len(cfg.Folders))
-
+	log.Printf("Cache: enabled=%t, path=%s", cfg.CacheEnabled, cfg.CachePath)
+	log.Printf("Logging: mode=%s, dir=%s", cfg.LogMode, cfg.LogDir)
 	for i, folder := range cfg.Folders {
 		log.Printf("  %d. %s -> %s (%s, delete: %s)",
 			i+1, folder.Local, folder.Remote, folder.SyncMode, folder.DeleteMode)
 	}
 
-	syncer.Start()
+	syncer.Start(ctx)
+
+	if httpServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}
+	log.Println("Sync service stopped")
 }
